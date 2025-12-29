@@ -1,67 +1,93 @@
-import { NextResponse } from "next/server";
-import JSZip from "jszip";
-import { PNG } from "pngjs";
 import { contours as d3Contours } from "d3-contour";
 import { geoIdentity, geoPath } from "d3-geo";
+import JSZip from "jszip";
+import { PNG } from "pngjs";
 
-type Bounds = { west: number; south: number; east: number; north: number };
+/* ===================== TYPES ===================== */
 
-function clamp(n: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, n));
+type Bounds = {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+};
+
+/* ===================== HELPERS ===================== */
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
 
 function lonLatToTile(lon: number, lat: number, z: number) {
   const n = 2 ** z;
   const x = ((lon + 180) / 360) * n;
   const latRad = (lat * Math.PI) / 180;
-  const y = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
+  const y =
+    ((1 -
+      Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) /
+      2) *
+    n;
   return { x, y };
 }
 
-// Terrarium: (R*256 + G + B/256) - 32768
+// Terrarium encoding
 function decodeTerrarium(r: number, g: number, b: number) {
   return r * 256 + g + b / 256 - 32768;
 }
 
 async function fetchPng(url: string): Promise<PNG> {
   const res = await fetch(url, { cache: "force-cache" });
-  if (!res.ok) throw new Error(`Tile fetch failed: ${res.status} ${url}`);
+  if (!res.ok) throw new Error(`Tile fetch failed: ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
   return PNG.sync.read(buf);
 }
 
-function nearestSample(src: Float32Array, srcW: number, srcH: number, x: number, y: number) {
-  const ix = clamp(Math.round(x), 0, srcW - 1);
-  const iy = clamp(Math.round(y), 0, srcH - 1);
-  return src[iy * srcW + ix];
+function nearestSample(
+  src: Float32Array,
+  w: number,
+  h: number,
+  x: number,
+  y: number
+) {
+  const ix = clamp(Math.round(x), 0, w - 1);
+  const iy = clamp(Math.round(y), 0, h - 1);
+  return src[iy * w + ix];
 }
 
-function svgHeader(widthIn: number, heightIn: number) {
+function svgHeader(w: number, h: number) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg"
-  width="${widthIn}in" height="${heightIn}in"
-  viewBox="0 0 ${widthIn} ${heightIn}">
+  width="${w}in" height="${h}in"
+  viewBox="0 0 ${w} ${h}">
 `;
 }
+
 function svgFooter() {
   return `</svg>\n`;
 }
 
-function circlesForAlignment(widthIn: number, heightIn: number, holeDiameterIn: number, holeInsetIn: number) {
-  const r = holeDiameterIn / 2;
+function alignmentHoles(
+  w: number,
+  h: number,
+  d: number,
+  inset: number
+) {
+  const r = d / 2;
   const pts = [
-    [holeInsetIn, holeInsetIn],
-    [widthIn - holeInsetIn, holeInsetIn],
-    [holeInsetIn, heightIn - holeInsetIn],
-    [widthIn - holeInsetIn, heightIn - holeInsetIn],
+    [inset, inset],
+    [w - inset, inset],
+    [inset, h - inset],
+    [w - inset, h - inset],
   ];
   return pts
     .map(
-      ([cx, cy]) =>
-        `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="black" stroke-width="0.001"/>`
+      ([x, y]) =>
+        `<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="black" stroke-width="0.001"/>`
     )
     .join("\n");
 }
+
+/* ===================== ROUTE ===================== */
 
 export async function POST(req: Request) {
   try {
@@ -73,18 +99,23 @@ export async function POST(req: Request) {
     const intervalM = Number(body.intervalM ?? 30);
     const grid = Number(body.grid ?? 256);
 
-    const addAlignmentHoles = Boolean(body.addAlignmentHoles ?? true);
+    const addHoles = Boolean(body.addAlignmentHoles ?? true);
     const holeDiameterIn = Number(body.holeDiameterIn ?? 0.125);
     const holeInsetIn = Number(body.holeInsetIn ?? 0.35);
 
-    if (!bounds || widthIn <= 0 || heightIn <= 0 || intervalM <= 0 || grid < 64) {
-      return new NextResponse("Bad request", { status: 400 });
+    if (
+      !bounds ||
+      widthIn <= 0 ||
+      heightIn <= 0 ||
+      intervalM <= 0 ||
+      grid < 64
+    ) {
+      return new Response("Bad request", { status: 400 });
     }
 
-    // Keep MVP simple: fixed zoom.
-    // If you want: we can auto-pick zoom later.
-    const z = 12;
+    /* ===================== TILE SETUP ===================== */
 
+    const z = 12; // fixed MVP zoom
     const tl = lonLatToTile(bounds.west, bounds.north, z);
     const br = lonLatToTile(bounds.east, bounds.south, z);
 
@@ -95,13 +126,14 @@ export async function POST(req: Request) {
 
     const tileCount = (xMax - xMin + 1) * (yMax - yMin + 1);
     if (tileCount > 64) {
-      return new NextResponse(
-        `Selection too large (needs ${tileCount} elevation tiles). Zoom in more.`,
+      return new Response(
+        "Area too large — zoom in before exporting.",
         { status: 413 }
       );
     }
 
-    // Stitch Terrarium elevation tiles into one raster
+    /* ===================== STITCH ELEVATION ===================== */
+
     const tileSize = 256;
     const stitchedW = (xMax - xMin + 1) * tileSize;
     const stitchedH = (yMax - yMin + 1) * tileSize;
@@ -109,14 +141,17 @@ export async function POST(req: Request) {
 
     for (let ty = yMin; ty <= yMax; ty++) {
       for (let tx = xMin; tx <= xMax; tx++) {
-        // Free public terrarium tiles (AWS). If this ever changes, we can swap providers.
         const url = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`;
         const png = await fetchPng(url);
 
         for (let py = 0; py < tileSize; py++) {
           for (let px = 0; px < tileSize; px++) {
-            const si = (py * tileSize + px) * 4;
-            const elev = decodeTerrarium(png.data[si], png.data[si + 1], png.data[si + 2]);
+            const i = (py * tileSize + px) * 4;
+            const elev = decodeTerrarium(
+              png.data[i],
+              png.data[i + 1],
+              png.data[i + 2]
+            );
 
             const gx = (tx - xMin) * tileSize + px;
             const gy = (ty - yMin) * tileSize + py;
@@ -126,114 +161,124 @@ export async function POST(req: Request) {
       }
     }
 
-    // Pixel-space rectangle within stitched raster for the exact viewport bounds
+    /* ===================== SAMPLE GRID ===================== */
+
     const pxWest = (Math.min(tl.x, br.x) - xMin) * tileSize;
     const pxEast = (Math.max(tl.x, br.x) - xMin) * tileSize;
     const pxNorth = (Math.min(tl.y, br.y) - yMin) * tileSize;
     const pxSouth = (Math.max(tl.y, br.y) - yMin) * tileSize;
 
-    // Sample into grid x grid for contouring
     const values = new Float32Array(grid * grid);
     let minE = Infinity;
     let maxE = -Infinity;
 
-    for (let j = 0; j < grid; j++) {
-      const tY = j / (grid - 1);
-      const sy = pxNorth + (pxSouth - pxNorth) * tY;
+    for (let y = 0; y < grid; y++) {
+      const ty = y / (grid - 1);
+      const sy = pxNorth + (pxSouth - pxNorth) * ty;
 
-      for (let i = 0; i < grid; i++) {
-        const tX = i / (grid - 1);
-        const sx = pxWest + (pxEast - pxWest) * tX;
+      for (let x = 0; x < grid; x++) {
+        const tx = x / (grid - 1);
+        const sx = pxWest + (pxEast - pxWest) * tx;
 
-        const v = nearestSample(stitched, stitchedW, stitchedH, sx, sy);
-        values[j * grid + i] = v;
-        if (v < minE) minE = v;
-        if (v > maxE) maxE = v;
+        const v = nearestSample(
+          stitched,
+          stitchedW,
+          stitchedH,
+          sx,
+          sy
+        );
+
+        values[y * grid + x] = v;
+        minE = Math.min(minE, v);
+        maxE = Math.max(maxE, v);
       }
     }
 
-    if (!isFinite(minE) || !isFinite(maxE) || maxE <= minE) {
-      return new NextResponse("Elevation data invalid for this area.", { status: 502 });
-    }
+    /* ===================== CONTOURS ===================== */
 
-    // Thresholds = one silhouette slice per interval
     const start = Math.floor(minE / intervalM) * intervalM;
     const end = Math.ceil(maxE / intervalM) * intervalM;
-
     const thresholds: number[] = [];
-    for (let t = start + intervalM; t <= end; t += intervalM) thresholds.push(t);
 
-    if (!thresholds.length) {
-      return new NextResponse("No layers produced. Try a smaller interval.", { status: 400 });
+    for (let t = start + intervalM; t <= end; t += intervalM) {
+      thresholds.push(t);
     }
 
-    const contourGen = d3Contours().size([grid, grid]).thresholds(thresholds);
-    const contourFeatures = contourGen(values);
+    const contourGen = d3Contours()
+      .size([grid, grid])
+      .thresholds(thresholds);
 
-    const proj = geoIdentity();
-    const pathGen = geoPath(proj);
+    const features = contourGen(values);
+    const pathGen = geoPath(geoIdentity());
 
-    // scale grid coords → inches
     const scaleX = widthIn / (grid - 1);
     const scaleY = heightIn / (grid - 1);
 
+    /* ===================== BUILD ZIP ===================== */
+
     const zip = new JSZip();
-    const holes = addAlignmentHoles ? circlesForAlignment(widthIn, heightIn, holeDiameterIn, holeInsetIn) : "";
+    const holes = addHoles
+      ? alignmentHoles(widthIn, heightIn, holeDiameterIn, holeInsetIn)
+      : "";
 
-    let written = 0;
+    let layerIndex = 1;
 
-    for (let idx = 0; idx < contourFeatures.length; idx++) {
-      const f: any = contourFeatures[idx];
-      const level = f.value;
-      const d = pathGen(f);
+    for (const f of features) {
+      const d = pathGen(f as any);
       if (!d) continue;
 
-      const layerNumber = String(idx + 1).padStart(3, "0");
-      const name = `layer_${layerNumber}_${Math.round(level)}m.svg`;
+      const name = `layer_${String(layerIndex).padStart(3, "0")}_${Math.round(
+        (f as any).value
+      )}m.svg`;
 
-      // Stroke width corrected for the scaling transform
       const stroke = 0.001 / Math.max(scaleX, scaleY);
 
       const svg =
         svgHeader(widthIn, heightIn) +
-        (holes ? `  ${holes}\n` : "") +
-        `  <g transform="scale(${scaleX} ${scaleY})">\n` +
-        `    <path d="${d}" fill="none" stroke="black" stroke-width="${stroke}"/>\n` +
-        `  </g>\n` +
+        (holes ? holes + "\n" : "") +
+        `<g transform="scale(${scaleX} ${scaleY})">
+  <path d="${d}" fill="none" stroke="black" stroke-width="${stroke}" />
+</g>
+` +
         svgFooter();
 
       zip.file(name, svg);
-      written++;
+      layerIndex++;
     }
 
     zip.file(
       "README.txt",
       [
-        "Topo → Glowforge export",
+        "Topo → Glowforge Export",
         `Min elevation: ${minE.toFixed(2)} m`,
         `Max elevation: ${maxE.toFixed(2)} m`,
         `Interval: ${intervalM} m`,
         `Grid: ${grid} x ${grid}`,
-        `Layers written: ${written}`,
+        `Layers: ${layerIndex - 1}`,
         "",
-        "Each SVG is a silhouette slice (everything ABOVE the layer elevation).",
-        "In Glowforge: set black stroke to CUT.",
+        "Each SVG is a silhouette slice.",
+        "Set stroke to CUT in Glowforge.",
       ].join("\n")
     );
 
-    // IMPORTANT: return Uint8Array so NextResponse is happy on Vercel
-    const zipBytes = await zip.generateAsync({ type: "uint8array" });
+    /* ===================== RESPONSE ===================== */
 
-    return new Response(zipBytes, {
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const buffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    );
+
+    return new Response(buffer, {
       status: 200,
       headers: {
-      "Content-Type": "application/zip",
-      "Content-Disposition": `attachment; filename="topo_layers.zip"`,
-    },
-  });
-
-
-  } catch (e: any) {
-    return new NextResponse(`Export error: ${e?.message ?? e}`, { status: 500 });
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="topo_layers.zip"`,
+      },
+    });
+  } catch (err: any) {
+    return new Response(`Export failed: ${err?.message ?? err}`, {
+      status: 500,
+    });
   }
 }
