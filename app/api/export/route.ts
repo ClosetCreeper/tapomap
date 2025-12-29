@@ -224,13 +224,15 @@ export async function POST(req: Request) {
     // IMPORTANT: return Uint8Array so NextResponse is happy on Vercel
     const zipBytes = await zip.generateAsync({ type: "uint8array" });
 
-    return new NextResponse(zipBytes, {
+    return new Response(zipBytes, {
       status: 200,
       headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="topo_layers.zip"`,
-      },
-    });
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="topo_layers.zip"`,
+    },
+  });
+
+
   } catch (e: any) {
     return new NextResponse(`Export error: ${e?.message ?? e}`, { status: 500 });
   }
