@@ -23,10 +23,7 @@ function lonLatToTile(lon: number, lat: number, z: number) {
   const x = ((lon + 180) / 360) * n;
   const latRad = (lat * Math.PI) / 180;
   const y =
-    ((1 -
-      Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) /
-      2) *
-    n;
+    ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
   return { x, y };
 }
 
@@ -78,22 +75,40 @@ function alignmentHoles(w: number, h: number, d: number, inset: number) {
 
 /* ===================== ROUTE ===================== */
 
+// Optional: avoid 405 if someone opens /api/export in browser
+export async function GET() {
+  return new Response("OK: /api/export exists. Use POST to generate a topo_layers.zip.", {
+    headers: { "Content-Type": "text/plain" },
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
 
     const bounds: Bounds = body.bounds;
+
     const widthIn = Number(body.widthIn ?? 20);
     const heightIn = Number(body.heightIn ?? 12);
-    const intervalM = Number(body.intervalM ?? 30);
     const grid = Number(body.grid ?? 256);
+
+    // NEW: layer control
+    const layerMode = (body.layerMode === "interval" ? "interval" : "layers") as
+      | "layers"
+      | "interval";
+    const layerCount = Math.max(1, Math.floor(Number(body.layerCount ?? 12)));
+    const intervalMInput = Math.max(1, Number(body.intervalM ?? 30));
 
     const addHoles = Boolean(body.addAlignmentHoles ?? true);
     const holeDiameterIn = Number(body.holeDiameterIn ?? 0.125);
     const holeInsetIn = Number(body.holeInsetIn ?? 0.35);
 
-    if (!bounds || widthIn <= 0 || heightIn <= 0 || intervalM <= 0 || grid < 64) {
+    if (!bounds || widthIn <= 0 || heightIn <= 0 || grid < 64) {
       return new Response("Bad request", { status: 400 });
+    }
+
+    if (layerMode === "interval" && intervalMInput <= 0) {
+      return new Response("Bad request: intervalM must be > 0", { status: 400 });
     }
 
     /* ===================== TILE SETUP ===================== */
@@ -165,11 +180,28 @@ export async function POST(req: Request) {
 
     /* ===================== CONTOURS ===================== */
 
-    const start = Math.floor(minE / intervalM) * intervalM;
-    const end = Math.ceil(maxE / intervalM) * intervalM;
+    const range = maxE - minE;
+    if (!isFinite(range) || range <= 0.5) {
+      return new Response(
+        "Not enough elevation variation in this area. Try a bigger area or different spot.",
+        { status: 400 }
+      );
+    }
 
-    const thresholds: number[] = [];
-    for (let t = start + intervalM; t <= end; t += intervalM) thresholds.push(t);
+    let thresholds: number[] = [];
+
+    if (layerMode === "layers") {
+      // EXACTLY N layers
+      const step = range / layerCount;
+      for (let i = 1; i <= layerCount; i++) {
+        thresholds.push(minE + step * i);
+      }
+    } else {
+      // Interval mode (old behavior)
+      const start = Math.floor(minE / intervalMInput) * intervalMInput;
+      const end = Math.ceil(maxE / intervalMInput) * intervalMInput;
+      for (let t = start + intervalMInput; t <= end; t += intervalMInput) thresholds.push(t);
+    }
 
     const contourGen = d3Contours().size([grid, grid]).thresholds(thresholds);
     const features = contourGen(values);
@@ -206,15 +238,18 @@ export async function POST(req: Request) {
       layerIndex++;
     }
 
+    const intervalUsed = layerMode === "layers" ? range / layerCount : intervalMInput;
+
     zip.file(
       "README.txt",
       [
         "Topo → Glowforge Export",
         `Min elevation: ${minE.toFixed(2)} m`,
         `Max elevation: ${maxE.toFixed(2)} m`,
-        `Interval: ${intervalM} m`,
+        `Mode: ${layerMode === "layers" ? `layers (${layerCount})` : `interval (${intervalMInput}m)`}`,
+        `Approx interval: ${intervalUsed.toFixed(2)} m`,
         `Grid: ${grid} x ${grid}`,
-        `Layers: ${layerIndex - 1}`,
+        `Layers generated: ${layerIndex - 1}`,
         "",
         "Each SVG is a silhouette slice.",
         "Set stroke to CUT in Glowforge.",
@@ -222,7 +257,7 @@ export async function POST(req: Request) {
     );
 
     /* ===================== RESPONSE ===================== */
-    // KEY FIX: generate ArrayBuffer directly (avoids Uint8Array<ArrayBufferLike>/SharedArrayBuffer typings)
+    // generate ArrayBuffer directly (avoids Uint8Array<ArrayBufferLike>/SharedArrayBuffer typings)
     const zipArrayBuffer = await zip.generateAsync({ type: "arraybuffer" });
 
     return new Response(zipArrayBuffer, {
