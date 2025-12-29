@@ -92,49 +92,51 @@ export default function Home() {
   }
 
   async function exportTopo() {
-    if (!bounds) return;
-    setBusy(true);
-    setStatus("Fetching elevation + generating layers…");
+  if (!bounds) return;
 
-    try {
-      const res = await fetch("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          bounds,
-          widthIn,
-          heightIn,
-          intervalM,
-          grid,
-          addAlignmentHoles: true,
-          holeDiameterIn: 0.125,
-          holeInsetIn: 0.35,
-        }),
-      });
+  setBusy(true);
+  setStatus("Exporting…");
 
-      if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(msg || "Export failed");
-      }
+  try {
+    const res = await fetch("/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bounds,
+        widthIn,
+        heightIn,
+        intervalM,
+        grid,
+        addAlignmentHoles: true,
+        holeDiameterIn: 0.125,
+        holeInsetIn: 0.35,
+      }),
+    });
 
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "topo_layers.zip";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      URL.revokeObjectURL(url);
-      setStatus("Done! Downloaded topo_layers.zip");
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? e}`);
-    } finally {
-      setBusy(false);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status} ${res.statusText}: ${text}`);
     }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "topo_layers.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(url);
+    setStatus("Downloaded topo_layers.zip");
+  } catch (e: any) {
+    setStatus(`Export failed: ${e?.message ?? e}`);
+  } finally {
+    setBusy(false);
   }
+}
+
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "420px 1fr", height: "100vh" }}>
