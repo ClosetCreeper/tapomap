@@ -42,13 +42,7 @@ async function fetchPng(url: string): Promise<PNG> {
   return PNG.sync.read(buf);
 }
 
-function nearestSample(
-  src: Float32Array,
-  w: number,
-  h: number,
-  x: number,
-  y: number
-) {
+function nearestSample(src: Float32Array, w: number, h: number, x: number, y: number) {
   const ix = clamp(Math.round(x), 0, w - 1);
   const iy = clamp(Math.round(y), 0, h - 1);
   return src[iy * w + ix];
@@ -66,12 +60,7 @@ function svgFooter() {
   return `</svg>\n`;
 }
 
-function alignmentHoles(
-  w: number,
-  h: number,
-  d: number,
-  inset: number
-) {
+function alignmentHoles(w: number, h: number, d: number, inset: number) {
   const r = d / 2;
   const pts = [
     [inset, inset],
@@ -103,13 +92,7 @@ export async function POST(req: Request) {
     const holeDiameterIn = Number(body.holeDiameterIn ?? 0.125);
     const holeInsetIn = Number(body.holeInsetIn ?? 0.35);
 
-    if (
-      !bounds ||
-      widthIn <= 0 ||
-      heightIn <= 0 ||
-      intervalM <= 0 ||
-      grid < 64
-    ) {
+    if (!bounds || widthIn <= 0 || heightIn <= 0 || intervalM <= 0 || grid < 64) {
       return new Response("Bad request", { status: 400 });
     }
 
@@ -126,10 +109,7 @@ export async function POST(req: Request) {
 
     const tileCount = (xMax - xMin + 1) * (yMax - yMin + 1);
     if (tileCount > 64) {
-      return new Response(
-        "Area too large — zoom in before exporting.",
-        { status: 413 }
-      );
+      return new Response("Area too large — zoom in before exporting.", { status: 413 });
     }
 
     /* ===================== STITCH ELEVATION ===================== */
@@ -147,11 +127,7 @@ export async function POST(req: Request) {
         for (let py = 0; py < tileSize; py++) {
           for (let px = 0; px < tileSize; px++) {
             const i = (py * tileSize + px) * 4;
-            const elev = decodeTerrarium(
-              png.data[i],
-              png.data[i + 1],
-              png.data[i + 2]
-            );
+            const elev = decodeTerrarium(png.data[i], png.data[i + 1], png.data[i + 2]);
 
             const gx = (tx - xMin) * tileSize + px;
             const gy = (ty - yMin) * tileSize + py;
@@ -180,14 +156,7 @@ export async function POST(req: Request) {
         const tx = x / (grid - 1);
         const sx = pxWest + (pxEast - pxWest) * tx;
 
-        const v = nearestSample(
-          stitched,
-          stitchedW,
-          stitchedH,
-          sx,
-          sy
-        );
-
+        const v = nearestSample(stitched, stitchedW, stitchedH, sx, sy);
         values[y * grid + x] = v;
         minE = Math.min(minE, v);
         maxE = Math.max(maxE, v);
@@ -198,17 +167,13 @@ export async function POST(req: Request) {
 
     const start = Math.floor(minE / intervalM) * intervalM;
     const end = Math.ceil(maxE / intervalM) * intervalM;
+
     const thresholds: number[] = [];
+    for (let t = start + intervalM; t <= end; t += intervalM) thresholds.push(t);
 
-    for (let t = start + intervalM; t <= end; t += intervalM) {
-      thresholds.push(t);
-    }
-
-    const contourGen = d3Contours()
-      .size([grid, grid])
-      .thresholds(thresholds);
-
+    const contourGen = d3Contours().size([grid, grid]).thresholds(thresholds);
     const features = contourGen(values);
+
     const pathGen = geoPath(geoIdentity());
 
     const scaleX = widthIn / (grid - 1);
@@ -217,9 +182,7 @@ export async function POST(req: Request) {
     /* ===================== BUILD ZIP ===================== */
 
     const zip = new JSZip();
-    const holes = addHoles
-      ? alignmentHoles(widthIn, heightIn, holeDiameterIn, holeInsetIn)
-      : "";
+    const holes = addHoles ? alignmentHoles(widthIn, heightIn, holeDiameterIn, holeInsetIn) : "";
 
     let layerIndex = 1;
 
@@ -227,10 +190,7 @@ export async function POST(req: Request) {
       const d = pathGen(f as any);
       if (!d) continue;
 
-      const name = `layer_${String(layerIndex).padStart(3, "0")}_${Math.round(
-        (f as any).value
-      )}m.svg`;
-
+      const name = `layer_${String(layerIndex).padStart(3, "0")}_${Math.round((f as any).value)}m.svg`;
       const stroke = 0.001 / Math.max(scaleX, scaleY);
 
       const svg =
@@ -261,24 +221,17 @@ export async function POST(req: Request) {
       ].join("\n")
     );
 
-    /* ===================== RESPONSE ===================== */
-
+    // Make a Blob (always valid BodyInit)
     const bytes = await zip.generateAsync({ type: "uint8array" });
-    const buffer = bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength
-    );
+    const zipBlob = new Blob([bytes], { type: "application/zip" });
 
-    return new Response(buffer, {
+    return new Response(zipBlob, {
       status: 200,
       headers: {
-        "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="topo_layers.zip"`,
       },
     });
   } catch (err: any) {
-    return new Response(`Export failed: ${err?.message ?? err}`, {
-      status: 500,
-    });
+    return new Response(`Export failed: ${err?.message ?? err}`, { status: 500 });
   }
 }
