@@ -221,13 +221,14 @@ export async function POST(req: Request) {
       ].join("\n")
     );
 
-    // Make a Blob (always valid BodyInit)
-    const bytes = await zip.generateAsync({ type: "uint8array" });
-    const zipBlob = new Blob([bytes], { type: "application/zip" });
+    /* ===================== RESPONSE ===================== */
+    // KEY FIX: generate ArrayBuffer directly (avoids Uint8Array<ArrayBufferLike>/SharedArrayBuffer typings)
+    const zipArrayBuffer = await zip.generateAsync({ type: "arraybuffer" });
 
-    return new Response(zipBlob, {
+    return new Response(zipArrayBuffer, {
       status: 200,
       headers: {
+        "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="topo_layers.zip"`,
       },
     });
