@@ -19,7 +19,12 @@ export default function Home() {
   // Export settings
   const [widthIn, setWidthIn] = useState(20);
   const [heightIn, setHeightIn] = useState(12);
+
+  // NEW: control layers either by count or by meters/layer
+  const [mode, setMode] = useState<"layers" | "interval">("layers");
+  const [layerCount, setLayerCount] = useState(12);
   const [intervalM, setIntervalM] = useState(30);
+
   const [grid, setGrid] = useState(256);
 
   const [busy, setBusy] = useState(false);
@@ -72,12 +77,13 @@ export default function Home() {
   async function doSearch() {
     const map = mapRef.current;
     if (!map) return;
+
     const q = query.trim();
     if (!q) return;
 
     setSearchStatus("Searching…");
     try {
-      const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`, { method: "GET" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
 
@@ -92,51 +98,56 @@ export default function Home() {
   }
 
   async function exportTopo() {
-  if (!bounds) return;
+    if (!bounds) return;
 
-  setBusy(true);
-  setStatus("Exporting…");
+    setBusy(true);
+    setStatus("Exporting…");
 
-  try {
-    const res = await fetch("/api/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        bounds,
-        widthIn,
-        heightIn,
-        intervalM,
-        grid,
-        addAlignmentHoles: true,
-        holeDiameterIn: 0.125,
-        holeInsetIn: 0.35,
-      }),
-    });
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bounds,
+          widthIn,
+          heightIn,
+          grid,
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`${res.status} ${res.statusText}: ${text}`);
+          // NEW: tell server how to decide layers
+          layerMode: mode, // "layers" or "interval"
+          layerCount, // used when mode === "layers"
+          intervalM, // used when mode === "interval"
+
+          addAlignmentHoles: true,
+          holeDiameterIn: 0.125,
+          holeInsetIn: 0.35,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ""}`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "topo_layers.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      URL.revokeObjectURL(url);
+      setStatus("Downloaded topo_layers.zip");
+    } catch (e: any) {
+      setStatus(`Export failed: ${e?.message ?? e}`);
+      console.error(e);
+    } finally {
+      setBusy(false);
     }
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "topo_layers.zip";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    URL.revokeObjectURL(url);
-    setStatus("Downloaded topo_layers.zip");
-  } catch (e: any) {
-    setStatus(`Export failed: ${e?.message ?? e}`);
-  } finally {
-    setBusy(false);
   }
-}
-
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "420px 1fr", height: "100vh" }}>
@@ -190,17 +201,72 @@ export default function Home() {
           <small style={{ color: "#666" }}>Glowforge Pro bed is 20×12.</small>
         </div>
 
+        {/* NEW: Layer control */}
         <div style={{ marginTop: 14 }}>
-          <label style={{ display: "block", marginBottom: 6 }}>Contour interval (meters per layer)</label>
-          <input
-            type="number"
-            value={intervalM}
-            onChange={(e) => setIntervalM(Number(e.target.value))}
-            min={1}
-            step={1}
-            style={{ width: "100%" }}
-          />
-          <small style={{ color: "#666" }}>Lower interval = more layers.</small>
+          <label style={{ display: "block", marginBottom: 6 }}>Layer control</label>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button
+              type="button"
+              onClick={() => setMode("layers")}
+              style={{
+                flex: 1,
+                padding: "8px 10px",
+                fontWeight: 700,
+                border: "1px solid #ccc",
+                background: mode === "layers" ? "#eee" : "white",
+                cursor: "pointer",
+              }}
+            >
+              By # of layers
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setMode("interval")}
+              style={{
+                flex: 1,
+                padding: "8px 10px",
+                fontWeight: 700,
+                border: "1px solid #ccc",
+                background: mode === "interval" ? "#eee" : "white",
+                cursor: "pointer",
+              }}
+            >
+              By meters/layer
+            </button>
+          </div>
+
+          {mode === "layers" ? (
+            <>
+              <label style={{ display: "block", marginBottom: 6 }}>Number of layers</label>
+              <input
+                type="number"
+                value={layerCount}
+                onChange={(e) => {
+                  const n = Math.floor(Number(e.target.value) || 1);
+                  setLayerCount(Math.max(1, n));
+                }}
+                min={1}
+                step={1}
+                style={{ width: "100%" }}
+              />
+              <small style={{ color: "#666" }}>More layers = smoother terrain, longer cut time.</small>
+            </>
+          ) : (
+            <>
+              <label style={{ display: "block", marginBottom: 6 }}>Contour interval (meters per layer)</label>
+              <input
+                type="number"
+                value={intervalM}
+                onChange={(e) => setIntervalM(Math.max(1, Number(e.target.value) || 1))}
+                min={1}
+                step={1}
+                style={{ width: "100%" }}
+              />
+              <small style={{ color: "#666" }}>Lower interval = more layers.</small>
+            </>
+          )}
         </div>
 
         <div style={{ marginTop: 14 }}>
@@ -227,9 +293,7 @@ export default function Home() {
 
         <div style={{ fontSize: 13, color: "#444" }}>
           <b>Current bounds</b>
-          <pre style={{ whiteSpace: "pre-wrap" }}>
-            {bounds ? JSON.stringify(bounds, null, 2) : "Loading…"}
-          </pre>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{bounds ? JSON.stringify(bounds, null, 2) : "Loading…"}</pre>
         </div>
       </div>
 
